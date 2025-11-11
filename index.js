@@ -1,12 +1,41 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
-app.use(express.json({ limit: '50mb' })); // Increase limit for potentially large reports
+// Increase limit for potentially large reports with embedded images
+app.use(express.json({ limit: '50mb' }));
 app.use(cors()); // Enable CORS for all routes
 
 const PORT = process.env.PORT || 8080;
+
+/**
+ * Fetches an image from a URL and converts it to a base64 data URL.
+ * @param {string | null} url The URL of the image to fetch.
+ * @returns {Promise<string | null>} A promise that resolves to the data URL or null.
+ */
+async function imageUrlToDataUrl(url) {
+    if (!url || !url.startsWith('http')) {
+        console.warn(`Invalid or missing URL provided: ${url}`);
+        return null;
+    }
+    try {
+        const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 10000 }); // 10s timeout
+        const mimeType = response.headers['content-type'];
+        if (!mimeType || !mimeType.startsWith('image/')) {
+            console.warn(`URL did not point to a valid image: ${url}`);
+            return null;
+        }
+        const base64 = Buffer.from(response.data, 'binary').toString('base64');
+        return `data:${mimeType};base64,${base64}`;
+    } catch (error) {
+        // Log a warning but don't crash the process. The PDF will just have a missing image.
+        console.warn(`Could not fetch image at ${url}:`, error.message);
+        return null; 
+    }
+}
+
 
 app.get('/', (req, res) => {
   res.send('APEX PDF Generator is running.');
@@ -14,16 +43,22 @@ app.get('/', (req, res) => {
 
 app.post('/generate-pdf', async (req, res) => {
     console.log("Received request to generate PDF.");
-    const { finalReport, clientInfo, competitorDataWithImages, clientUrl } = req.body;
+    const { finalReport, clientInfo, competitorData, clientUrl } = req.body;
 
-    if (!finalReport || !clientInfo || !competitorDataWithImages || !clientUrl) {
+    if (!finalReport || !clientInfo || !competitorData || !clientUrl) {
         return res.status(400).send({ error: 'Missing required report data.' });
     }
 
     let browser = null;
     try {
+        console.log("Processing images for PDF embedding...");
+        const competitorDataWithImages = await Promise.all(competitorData.map(async (comp) => ({
+            ...comp,
+            logoDataUrl: await imageUrlToDataUrl(comp.logoUrl),
+            creativeDataUrl: await imageUrlToDataUrl(comp.creativeUrl),
+        })));
+        
         console.log("Launching Puppeteer...");
-        // These args are recommended for running in a containerized environment like Cloud Run
         browser = await puppeteer.launch({
             headless: true,
             args: [
@@ -33,9 +68,10 @@ app.post('/generate-pdf', async (req, res) => {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--single-process', // Use this with --no-sandbox
+                '--single-process',
                 '--disable-gpu'
             ],
+            timeout: 60000, 
         });
 
         console.log("Puppeteer launched. Opening new page.");
@@ -45,7 +81,7 @@ app.post('/generate-pdf', async (req, res) => {
         const htmlContent = getFullReportHtml(finalReport, clientInfo, competitorDataWithImages, clientUrl);
         
         console.log("Setting page content.");
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: 60000 });
 
         console.log("Generating PDF from page content.");
         const pdfBuffer = await page.pdf({
@@ -74,7 +110,7 @@ app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
 
-// --- HTML Generation Logic (moved from frontend) ---
+// --- HTML Generation Logic ---
 
 const svgs = {
     checkCircle: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #22c55e; flex-shrink: 0; margin-top: 0.125rem; display: inline-block; vertical-align: middle;"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"></path><path d="m9 12 2 2 4-4"></path></svg>`,
@@ -131,7 +167,7 @@ const getDealThermometerHtml = (dealRating) => {
 const getSingleCompetitorCardHtml = (competitor, report) => `
     <div style="background-color: #1e1e1e; border-radius: 1rem; border: 1px solid #2d2d2d; overflow: hidden; margin-bottom: 1.5rem; break-inside: avoid;">
         <div style="display: flex; align-items: center; gap: 1rem; padding: 1.5rem; border-bottom: 1px solid #2d2d2d;">
-            <img src="${competitor.logoDataUrl}" alt="${competitor.name} Logo" style="width: 4rem; height: 4rem; border-radius: 9999px; object-fit: contain; border: 1px solid #404040; background-color: white; padding: 0.25rem;" />
+            ${competitor.logoDataUrl ? `<img src="${competitor.logoDataUrl}" alt="${competitor.name} Logo" style="width: 4rem; height: 4rem; border-radius: 9999px; object-fit: contain; border: 1px solid #404040; background-color: white; padding: 0.25rem;" />` : `<div style="width: 4rem; height: 4rem; border-radius: 9999px; background-color: #2d2d2d; display:flex; align-items:center; justify-content:center; color: #a3a3a3; font-size:0.75rem; text-align:center;">No Logo</div>`}
             <div>
                 <h3 style="font-size: 1.5rem; font-weight: 700; color: white;">${competitor.name}</h3>
                 <p style="color:#a78bfa; font-size: 0.875rem; word-break: break-all;">${competitor.url}</p>
@@ -144,8 +180,8 @@ const getSingleCompetitorCardHtml = (competitor, report) => `
             </div>
             <div><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.5rem;">Deal-o-Meter</h4>${getDealThermometerHtml(report.dealRating)}</div>
             <div><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.75rem;">How You Compare</h4>${getAnalysisContentHtml(report.analysis)}</div>
-            <div><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.75rem;">Top Deals</h4><ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem;">${competitor.topDeals.length > 0 ? competitor.topDeals.map(getDealItemHtml).join('') : '<p style="color:#a3a3a3;">No top deals found.</p>'}</ul></div>
-            ${competitor.creativeUrl ? `<div style="padding-top: 1.5rem;"><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.75rem;">Ad Creative</h4><img src="${competitor.creativeDataUrl}" alt="${competitor.name} Ad Creative" style="width: 100%; border-radius: 0.5rem; object-fit: contain; border: 1px solid #2d2d2d;" /></div>` : ''}
+            <div><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.75rem;">Top Deals</h4><ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem;">${competitor.topDeals && competitor.topDeals.length > 0 ? competitor.topDeals.map(getDealItemHtml).join('') : '<p style="color:#a3a3a3;">No top deals found.</p>'}</ul></div>
+            ${competitor.creativeDataUrl ? `<div style="padding-top: 1.5rem;"><h4 style="font-size: 0.875rem; font-weight: 600; color: #a3a3a3; text-transform: uppercase; margin-bottom: 0.75rem;">Ad Creative</h4><img src="${competitor.creativeDataUrl}" alt="${competitor.name} Ad Creative" style="width: 100%; border-radius: 0.5rem; object-fit: contain; border: 1px solid #2d2d2d;" /></div>` : ''}
         </div>
     </div>`;
 
@@ -212,11 +248,14 @@ const getFullReportHtml = (finalReport, clientInfo, competitorDataWithImages, cl
                     <div>
                         <h2 style="font-size:1.875rem; color:white; font-weight:700; margin-bottom:1.5rem; padding-top: 2rem; border-top: 1px solid #2d2d2d;">Competitor Teardown</h2>
                         <div>
-                            ${competitorDataWithImages.map(comp => getSingleCompetitorCardHtml(comp, finalReport.comparison.find(c => c.competitorName === comp.name))).join('')}
+                            ${competitorDataWithImages.map(comp => {
+                                const report = finalReport.comparison.find(c => c.competitorName === comp.name);
+                                return report ? getSingleCompetitorCardHtml(comp, report) : '';
+                            }).join('')}
                         </div>
                     </div>
                 </div>
             </body>
         </html>
     `;
-}
+};
