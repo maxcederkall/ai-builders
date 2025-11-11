@@ -1,26 +1,30 @@
 # Use the official Node.js 20 image.
+# https://hub.docker.com/_/node
 FROM node:20-slim
 
 # Install necessary dependencies for Puppeteer to run headless Chrome.
-# This is the most critical part of the Dockerfile.
-RUN apt-get update \
-    && apt-get install -yq --no-install-recommends \
+# This is a crucial step for running it in a container.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
+    libc6 \
     libcairo2 \
     libcups2 \
     libdbus-1-3 \
-    libdrm2 \
+    libexpat1 \
+    libfontconfig1 \
     libgbm1 \
-    libgconf-2-4 \
-    libgdk-pixbuf2.0-0 \
+    libgcc1 \
     libglib2.0-0 \
     libgtk-3-0 \
     libnspr4 \
     libnss3 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
+    libstdc++6 \
     libx11-6 \
     libx11-xcb1 \
     libxcb1 \
@@ -34,27 +38,26 @@ RUN apt-get update \
     libxrender1 \
     libxss1 \
     libxtst6 \
-    ca-certificates \
-    fonts-liberation \
     lsb-release \
-    xdg-utils \
     wget \
-    --fix-missing
+    xdg-utils \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory.
+# Create and change to the app directory.
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json.
+# Copy application dependency manifests to the container image.
+# A wildcard is used to ensure both package.json AND package-lock.json are copied.
+# Copying this first makes sure we don't re-run npm install on every code change.
 COPY package*.json ./
 
-# Install dependencies.
-RUN npm install
+# Install production dependencies.
+RUN npm install --only=production
 
-# Copy the rest of the application code.
+# Copy local code to the container image.
 COPY . .
 
-# Expose the port the app runs on.
-EXPOSE 8080
-
-# Run the application.
+# Run the web service on container startup.
+# The "start" script is defined in our package.json.
 CMD [ "npm", "start" ]
